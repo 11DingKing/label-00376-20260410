@@ -238,6 +238,8 @@ export function useCanvasBoard() {
   
   // 保存待处理的脏矩形（用于 Worker 返回后的局部重绘）
   let pendingDirtyRect = null
+  // 标记是否有 Worker 正在处理中
+  let isWorkerProcessing = false
   
   /**
    * 处理 Worker 返回的消息
@@ -261,6 +263,9 @@ export function useCanvasBoard() {
     } else {
       redrawAll()
     }
+    
+    // 标记 Worker 处理完成
+    isWorkerProcessing = false
     logger.info(`Worker split complete: ${newStrokes.length} strokes`)
   }
 
@@ -633,15 +638,14 @@ export function useCanvasBoard() {
     const eraserSizeCopy = state.eraserSize
     const dirtyRectCopy = eraserDirtyRect ? { ...eraserDirtyRect } : null
     
-    // 清空路径
-    eraserPath = []
-    eraserDirtyRect = null
-    
     try {
       // 使用空间索引快速筛选受影响的笔画
       const affectedIds = spatialIndex.getStrokeIdsInEraserPath(eraserPathCopy, eraserSizeCopy)
       if (affectedIds.size === 0) {
         // 没有受影响的笔画，使用脏矩形局部重绘
+        // 注意：这里需要先清空路径，再重绘，否则视觉擦除效果会被保留
+        eraserPath = []
+        eraserDirtyRect = null
         if (dirtyRectCopy) {
           redrawDirtyRect(dirtyRectCopy)
         } else {
@@ -655,12 +659,19 @@ export function useCanvasBoard() {
       
       // 优先使用 Web Worker 异步处理
       if (strokeSplitWorker) {
+        // 标记 Worker 正在处理
+        isWorkerProcessing = true
+        
         // 保存脏矩形供 Worker 返回后使用
         pendingDirtyRect = dirtyRectCopy
         
         // 深拷贝数据以便传递给 Worker（避免 DataCloneError）
         const strokesForWorker = JSON.parse(JSON.stringify(toSplit))
         const pathForWorker = JSON.parse(JSON.stringify(eraserPathCopy))
+        
+        // 清空路径（但保留视觉擦除效果，直到 Worker 返回）
+        eraserPath = []
+        eraserDirtyRect = null
         
         strokeSplitWorker.postMessage({
           type: 'split',
@@ -673,6 +684,10 @@ export function useCanvasBoard() {
         // Worker 模式：不在这里重绘，等 Worker 返回结果后再重绘
       } else {
         // 降级：主线程同步处理
+        // 先清空路径
+        eraserPath = []
+        eraserDirtyRect = null
+        
         const unchanged = state.strokes.filter(s => !affectedIds.has(s.id))
         const newStrokes = recognizeRemainingObjects(toSplit, eraserPathCopy, eraserSizeCopy)
         state.strokes = [...unchanged, ...newStrokes]
@@ -688,6 +703,8 @@ export function useCanvasBoard() {
       }
     } catch (err) {
       logger.error('Erase failed:', err)
+      eraserPath = []
+      eraserDirtyRect = null
       redrawAll()
     }
   }
